@@ -40,8 +40,7 @@ private-isu (isugram) ISUCON 練習の司令塔。**Aだけが編集する。** 
 ## 計測ツール
 ### alp（nginx）: log_formatをLTSV化し request_time/upstream_response_time を出す（Cが/etc/nginxに反映）
 ```
-alp ltsv --file /var/log/nginx/access.log -m "/image/[0-9]+,/posts/[0-9]+,/@\w+" --sort sum -r
-```
+sudo alp ltsv --file /var/log/nginx/access.log -m "/image/[0-9]+,/posts/[0-9]+,/@\w+" --sort sum -r --apptime-label upstime --size-label body_bytes```
 ### pt-query-digest（MySQL）: slow_query_log=1 / long_query_time=0（Cが/etc/mysqlに反映）
 ```
 sudo pt-query-digest /var/log/mysql/slow.log

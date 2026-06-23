@@ -131,8 +131,8 @@ func dbInitialize(ctx context.Context) {
 		"DELETE FROM comments WHERE id > 100000",
 		"UPDATE users SET del_flg = 0",
 		"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
-		// #1 comment_count を実件数で再構築(削除後のpostsに対して)
-		"UPDATE posts SET comment_count = (SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id)",
+		// #1 comment_count 再構築: LEFT JOIN集計でN×サブクエリを回避
+		"UPDATE posts p LEFT JOIN (SELECT post_id, COUNT(*) AS cnt FROM comments GROUP BY post_id) c ON p.id = c.post_id SET p.comment_count = COALESCE(c.cnt, 0)",
 	}
 
 	for _, sql := range sqls {
@@ -837,13 +837,14 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 【3】imgdataはDBに保存しない。ファイルが正本、nginxが直接配信する。
 	query := "INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)"
 	result, err := db.ExecContext(
 		ctx,
 		query,
 		me.ID,
 		mime,
-		[]byte{}, // 【3】imgdataはDBに保存しない。ファイルが正本。
+		[]byte{},
 		r.FormValue("body"),
 	)
 	if err != nil {
@@ -875,8 +876,8 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	post := Post{}
-	// #7 画像配信に必要なmime/imgdataのみ取得(body等の不要列を読まない)
-	err = db.GetContext(ctx, &post, "SELECT `mime`, `imgdata` FROM `posts` WHERE `id` = ?", pid)
+	// imgdataはDB排除済み。mimeのみ取得してファイルから配信。
+	err = db.GetContext(ctx, &post, "SELECT `mime` FROM `posts` WHERE `id` = ?", pid)
 	if err != nil {
 		log.Print(err)
 		return
@@ -887,21 +888,15 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	if ext == "jpg" && post.Mime == "image/jpeg" ||
 		ext == "png" && post.Mime == "image/png" ||
 		ext == "gif" && post.Mime == "image/gif" {
-		if len(post.Imgdata) == 0 {
-			// 【3】imgdataなし=ファイル正本の新規投稿。nginxが配信するはず。
+		// ファイルから直接配信（nginxが先に配信するので通常ここは通らない）
+		fp := fmt.Sprintf("%s/%d%s", imageDir, pid, extFromMime(post.Mime))
+		data, err := os.ReadFile(fp)
+		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		// #4 遅延dump: 次回以降はnginxが直接配信する (post.IDは未取得なのでpidを使う)
-		if err := saveImageFile(pid, post.Mime, post.Imgdata); err != nil {
-			log.Print(err)
-		}
 		w.Header().Set("Content-Type", post.Mime)
-		_, err := w.Write(post.Imgdata)
-		if err != nil {
-			log.Print(err)
-			return
-		}
+		w.Write(data)
 		return
 	}
 
@@ -1058,7 +1053,7 @@ func main() {
 	// G2: コネクションプール設定（張り直し削減・並列度確保）
 	db.SetMaxOpenConns(64)
 	db.SetMaxIdleConns(64)
-	db.SetConnMaxLifetime(0)
+	db.SetConnMaxLifetime(time.Minute)
 
 	// #4 画像ダンプ先ディレクトリを用意
 	os.MkdirAll(imageDir, 0755)

@@ -231,52 +231,152 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 	}
 }
 
+// inClause は ids 件数分の "?" プレースホルダ文字列と引数列を返す。
+func inClause(ids []int) (string, []any) {
+	holders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, v := range ids {
+		holders[i] = "?"
+		args[i] = v
+	}
+	return strings.Join(holders, ","), args
+}
+
+// fetchUsersByIDs は users を id IN (...) で一括取得し id->User で返す。
+func fetchUsersByIDs(ctx context.Context, ids []int) (map[int]User, error) {
+	m := make(map[int]User, len(ids))
+	if len(ids) == 0 {
+		return m, nil
+	}
+	holder, args := inClause(ids)
+	var users []User
+	if err := db.SelectContext(ctx, &users, "SELECT * FROM `users` WHERE `id` IN ("+holder+")", args...); err != nil {
+		return nil, err
+	}
+	for _, u := range users {
+		m[u.ID] = u
+	}
+	return m, nil
+}
+
+// fetchCommentCounts は comments を post_id IN (...) GROUP BY で一括集計する。
+func fetchCommentCounts(ctx context.Context, postIDs []int) (map[int]int, error) {
+	m := make(map[int]int, len(postIDs))
+	if len(postIDs) == 0 {
+		return m, nil
+	}
+	holder, args := inClause(postIDs)
+	type ccRow struct {
+		PostID int `db:"post_id"`
+		Count  int `db:"count"`
+	}
+	var rows []ccRow
+	if err := db.SelectContext(ctx, &rows, "SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN ("+holder+") GROUP BY `post_id`", args...); err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		m[r.PostID] = r.Count
+	}
+	return m, nil
+}
+
+// #3 makePosts N+1解消: comments/users/comment_count をIN句で一括取得する。
+// 出力HTMLは元実装と完全一致(del_flg==0絞り→最大postsPerPage件, コメントは最新3件を時系列昇順)。
 func makePosts(ctx context.Context, results []Post, csrfToken string, allComments bool) ([]Post, error) {
-	var posts []Post
+	if len(results) == 0 {
+		return []Post{}, nil
+	}
 
+	// 投稿者をIN一括取得
+	authorIDs := make([]int, 0, len(results))
+	seenAuthor := make(map[int]bool, len(results))
 	for _, p := range results {
-		err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
+		if !seenAuthor[p.UserID] {
+			seenAuthor[p.UserID] = true
+			authorIDs = append(authorIDs, p.UserID)
 		}
+	}
+	authors, err := fetchUsersByIDs(ctx, authorIDs)
+	if err != nil {
+		return nil, err
+	}
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
-		if !allComments {
-			query += " LIMIT 3"
+	// 元実装と同じ順序で del_flg==0 の投稿を最大 postsPerPage 件選ぶ
+	selected := make([]Post, 0, postsPerPage)
+	for _, p := range results {
+		u, ok := authors[p.UserID]
+		if !ok || u.DelFlg != 0 {
+			continue
 		}
-		var comments []Comment
-		err = db.SelectContext(ctx, &comments, query, p.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		for i := range comments {
-			err := db.GetContext(ctx, &comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		// reverse
-		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
-			comments[i], comments[j] = comments[j], comments[i]
-		}
-
-		p.Comments = comments
-
-		err = db.GetContext(ctx, &p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if err != nil {
-			return nil, err
-		}
-
+		p.User = u
 		p.CSRFToken = csrfToken
-
-		if p.User.DelFlg == 0 {
-			posts = append(posts, p)
-		}
-		if len(posts) >= postsPerPage {
+		selected = append(selected, p)
+		if len(selected) >= postsPerPage {
 			break
 		}
+	}
+	if len(selected) == 0 {
+		return []Post{}, nil
+	}
+
+	postIDs := make([]int, len(selected))
+	for i, p := range selected {
+		postIDs[i] = p.ID
+	}
+
+	// コメント数を一括集計
+	counts, err := fetchCommentCounts(ctx, postIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// コメントを一括取得 (created_at DESC, id DESC = 単一投稿クエリ+indexと同順)
+	holder, args := inClause(postIDs)
+	var allCmts []Comment
+	err = db.SelectContext(ctx, &allCmts,
+		"SELECT * FROM `comments` WHERE `post_id` IN ("+holder+") ORDER BY `created_at` DESC, `id` DESC", args...)
+	if err != nil {
+		return nil, err
+	}
+
+	// post_id でグルーピング(取得順を維持)、allComments以外は3件に制限
+	cmtsByPost := make(map[int][]Comment, len(postIDs))
+	for _, c := range allCmts {
+		if !allComments && len(cmtsByPost[c.PostID]) >= 3 {
+			continue
+		}
+		cmtsByPost[c.PostID] = append(cmtsByPost[c.PostID], c)
+	}
+
+	// コメント投稿者をIN一括取得
+	cuSeen := make(map[int]bool)
+	cuIDs := []int{}
+	for _, cmts := range cmtsByPost {
+		for _, c := range cmts {
+			if !cuSeen[c.UserID] {
+				cuSeen[c.UserID] = true
+				cuIDs = append(cuIDs, c.UserID)
+			}
+		}
+	}
+	cusers, err := fetchUsersByIDs(ctx, cuIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	posts := make([]Post, 0, len(selected))
+	for _, p := range selected {
+		p.CommentCount = counts[p.ID]
+		cmts := cmtsByPost[p.ID]
+		for i := range cmts {
+			cmts[i].User = cusers[cmts[i].UserID]
+		}
+		// reverse (created_at DESC -> ASC)
+		for i, j := 0, len(cmts)-1; i < j; i, j = i+1, j-1 {
+			cmts[i], cmts[j] = cmts[j], cmts[i]
+		}
+		p.Comments = cmts
+		posts = append(posts, p)
 	}
 
 	return posts, nil

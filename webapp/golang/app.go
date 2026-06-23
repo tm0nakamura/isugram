@@ -1144,6 +1144,8 @@ func main() {
 	cfg.DBName = dbname
 	cfg.Params = map[string]string{
 		"charset": "utf8mb4",
+		// prepare/exec の2往復を1往復に。複文は未使用なので安全。
+		"interpolateParams": "true",
 	}
 	cfg.ParseTime = true
 	cfg.Loc = time.Local

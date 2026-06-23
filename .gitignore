@@ -17,3 +17,6 @@ webapp/sql/dump.sql.bz2
 
 # logs / runtime
 *.log
+
+# dumped image files (#4, regenerable)
+webapp/public/image/

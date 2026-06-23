@@ -1,5 +1,5 @@
 <div class="isu-posts">
   {{ range . }}
-  {{ renderPost . }}
+  {{ template "post.html" . }}
   {{ end }}
 </div>

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	crand "crypto/rand"
 	"crypto/sha512"
@@ -10,7 +9,6 @@ import (
 	"html/template"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"net/url"
@@ -44,17 +42,12 @@ var (
 	tmplPosts    *template.Template
 	tmplPostID   *template.Template
 	tmplBanned   *template.Template
-	tmplFrag     *template.Template // #13 post単一描画(断片キャッシュ用)
 )
 
 func initTemplates() {
 	fmap := template.FuncMap{
-		"imageURL":   imageURL,
-		"renderPost": renderPost, // #13 断片キャッシュ経由でpostを描画
+		"imageURL": imageURL,
 	}
-	// #13 post単一描画テンプレ(断片キャッシュ生成に使用)。post.htmlは無改変。
-	tmplFrag = template.Must(template.New("post.html").Funcs(fmap).ParseFiles(
-		getTemplPath("post.html")))
 	tmplLogin = template.Must(template.ParseFiles(
 		getTemplPath("layout.html"),
 		getTemplPath("login.html")))
@@ -461,83 +454,6 @@ func fetchUsersByIDs(ctx context.Context, ids []int) (map[int]User, error) {
 	return m, nil
 }
 
-// #13 post断片キャッシュ。html/templateのpostごとの再評価(pprof: walk 75%/evalCall 47%)を回避する。
-// 各postのHTML断片をプロセス内に保持し、ページ生成は断片連結だけにする。
-//   - キー: post.ID、版: fragVer[id]。コメント追加で版を進め断片を破棄(POST→GET即反映)。
-//   - CSRFトークンはユーザ毎に異なるため、断片描画時は固定プレースホルダ(csrfSentinel)で描画し、
-//     レスポンス送出直前に現ユーザのトークンへ置換する。これでDOMはバイト一致のまま描画コストだけ削減。
-//   - 揮発キャッシュ(一次データはMySQL/ファイル)。/initializeでリセット、起動後は遅延再生成。
-//   - 詳細ページ(post_id.html)はpost.htmlを実トークンで直接描画する従来経路のまま(1件のみ・非ホット)。
-const csrfSentinel = "Cs9RfTkPlAcEhOlDeR0K2xQ7zW"
-
-type fragEntry struct {
-	ver  uint64
-	html []byte
-}
-
-var (
-	fragMu    sync.RWMutex
-	fragVer   = map[int]uint64{}
-	fragCache = map[int]fragEntry{}
-)
-
-// bumpFrag は該当postの断片を破棄し版を進める(コメント追加時)。
-func bumpFrag(id int) {
-	fragMu.Lock()
-	fragVer[id]++
-	delete(fragCache, id)
-	fragMu.Unlock()
-}
-
-// resetFragCache は全断片を破棄する(/initialize時)。
-func resetFragCache() {
-	fragMu.Lock()
-	fragVer = map[int]uint64{}
-	fragCache = map[int]fragEntry{}
-	fragMu.Unlock()
-}
-
-// renderPostFragment は1件のpostをcsrfSentinel付きで描画する(キャッシュ実体)。
-func renderPostFragment(p Post) []byte {
-	p.CSRFToken = csrfSentinel
-	var buf bytes.Buffer
-	if err := tmplFrag.Execute(&buf, p); err != nil {
-		log.Print(err)
-	}
-	return buf.Bytes()
-}
-
-// renderPost はposts.htmlのFuncMapから呼ばれ、断片(template.HTML)を返す。
-// 版が一致するキャッシュがあれば再利用、無ければ描画して格納する。
-// 描画中に版が進んだ場合は格納をスキップ(古い断片を残さない=即反映を担保)。
-func renderPost(p Post) template.HTML {
-	id := p.ID
-	fragMu.RLock()
-	ver := fragVer[id]
-	e, ok := fragCache[id]
-	fragMu.RUnlock()
-	if ok && e.ver == ver {
-		return template.HTML(e.html)
-	}
-	html := renderPostFragment(p)
-	fragMu.Lock()
-	if fragVer[id] == ver {
-		fragCache[id] = fragEntry{ver: ver, html: html}
-	}
-	fragMu.Unlock()
-	return template.HTML(html)
-}
-
-// executeWithCSRF はテンプレをバッファに描画し、断片中のcsrfSentinelを実トークンへ置換して送出する。
-func executeWithCSRF(w http.ResponseWriter, t *template.Template, token string, data interface{}) {
-	var buf bytes.Buffer
-	if err := t.Execute(&buf, data); err != nil {
-		log.Print(err)
-		return
-	}
-	w.Write(bytes.ReplaceAll(buf.Bytes(), []byte(csrfSentinel), []byte(token)))
-}
-
 // #3 makePosts N+1解消: comments/users/comment_count をIN句で一括取得する。
 // 出力HTMLは元実装と完全一致(del_flg==0絞り→最大postsPerPage件, コメントは最新3件を時系列昇順)。
 func makePosts(ctx context.Context, results []Post, csrfToken string, allComments bool) ([]Post, error) {
@@ -746,8 +662,6 @@ func getInitialize(w http.ResponseWriter, r *http.Request) {
 	// dbInitializeでusers/posts/commentsがリセットされるため全キャッシュを破棄
 	// (タイムライン一覧/コメント/post_gen/session)
 	memcacheClient.FlushAll()
-	// #13 post描画断片もリセット(postsが再構築されるため)
-	resetFragCache()
 	// #10 リセット後のusersをインメモリへ再ロード
 	loadAllUsers(ctx)
 	// #4 揮発画像(id>10000)を掃除。種データの画像は遅延dumpで再生成される
@@ -895,14 +809,12 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := getCSRFToken(r)
-	// #13 断片中のcsrfSentinelを実トークンへ置換して送出(DOMバイト一致)
-	executeWithCSRF(w, tmplIndex, token, struct {
+	tmplIndex.Execute(w, struct {
 		Posts     []Post
 		Me        User
 		CSRFToken string
 		Flash     string
-	}{posts, me, token, getFlash(w, r, "notice")})
+	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
 }
 
 // #12 /@account のキャッシュ。
@@ -992,8 +904,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	// #13 断片中のcsrfSentinelを実トークンへ置換して送出(DOMバイト一致)
-	executeWithCSRF(w, tmplUser, getCSRFToken(r), struct {
+	tmplUser.Execute(w, struct {
 		Posts          []Post
 		User           User
 		PostCount      int
@@ -1049,8 +960,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// #13 断片中のcsrfSentinelを実トークンへ置換して送出(DOMバイト一致)
-	executeWithCSRF(w, tmplPosts, getCSRFToken(r), posts)
+	tmplPosts.Execute(w, posts)
 }
 
 func getPostsID(w http.ResponseWriter, r *http.Request) {
@@ -1246,8 +1156,6 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	memcacheClient.Delete(commentsCacheKey(postID))
-	// #13 該当postの描画断片を無効化(コメント数/最新3件が変わるため。POST→GET即反映)
-	bumpFrag(postID)
 
 	// #12 /@account 集計を即反映: commenter(本人コメント数)とpost所有者(本人postへのコメント数)を無効化
 	memcacheClient.Delete(accountStatsCacheKey(me.ID))
@@ -1407,15 +1315,5 @@ func main() {
 	r.Mount("/", http.FileServer(http.Dir("../public")))
 
 	go http.ListenAndServe("localhost:6060", nil)
-
-	const sockPath = "/run/isucon/app.sock"
-	_ = os.Remove(sockPath)                 // 古いソケット除去
-	ln, err := net.Listen("unix", sockPath) // unixソケットでListen
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := os.Chmod(sockPath, 0666); err != nil { // nginx(www-data)接続可
-		log.Fatal(err)
-	}
-	log.Fatal(http.Serve(ln, r))
+	log.Fatal(http.ListenAndServe(":8080", r))
 }

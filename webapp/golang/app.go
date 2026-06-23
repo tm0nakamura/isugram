@@ -772,7 +772,8 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.SelectContext(ctx, &results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	// #7 詳細表示にimgdataは不要(画像は/image/経由)。BLOBをロードしない
+	err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `id` = ?", pid)
 	if err != nil {
 		log.Print(err)
 		return
@@ -895,7 +896,8 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	post := Post{}
-	err = db.GetContext(ctx, &post, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	// #7 画像配信に必要なmime/imgdataのみ取得(body等の不要列を読まない)
+	err = db.GetContext(ctx, &post, "SELECT `mime`, `imgdata` FROM `posts` WHERE `id` = ?", pid)
 	if err != nil {
 		log.Print(err)
 		return
@@ -906,8 +908,8 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	if ext == "jpg" && post.Mime == "image/jpeg" ||
 		ext == "png" && post.Mime == "image/png" ||
 		ext == "gif" && post.Mime == "image/gif" {
-		// #4 遅延dump: 次回以降はnginxが直接配信する
-		if err := saveImageFile(post.ID, post.Mime, post.Imgdata); err != nil {
+		// #4 遅延dump: 次回以降はnginxが直接配信する (post.IDは未取得なのでpidを使う)
+		if err := saveImageFile(pid, post.Mime, post.Imgdata); err != nil {
 			log.Print(err)
 		}
 		w.Header().Set("Content-Type", post.Mime)

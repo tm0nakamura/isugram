@@ -277,6 +277,79 @@ func imageURL(p Post) string {
 	return "/image/" + strconv.Itoa(p.ID) + ext
 }
 
+// #4 画像ファイル出し: nginx try_files $uri @app で直接配信させる
+const imageDir = "../public/image"
+
+func extFromMime(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	}
+	return ""
+}
+
+// saveImageFile は public/image/<id>.<ext> へアトミック(temp→rename)に書き出す。
+// renameは同一FS内で原子的なので、nginxが書きかけを配信することはない。
+func saveImageFile(id int, mime string, data []byte) error {
+	ext := extFromMime(mime)
+	if ext == "" {
+		return nil
+	}
+	dst := fmt.Sprintf("%s/%d%s", imageDir, id, ext)
+	tmp, err := os.CreateTemp(imageDir, "tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	// nginx(www-data)が読めるよう0644にする(CreateTempは0600)
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+// /initialize で消える投稿(id>10000)のダンプ済み画像を掃除する。
+// 種データ(id<=10000)はimgdataが不変なのでキャッシュを残す。
+func cleanupVolatileImages() {
+	entries, err := os.ReadDir(imageDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		idStr := name
+		if dot := strings.IndexByte(name, '.'); dot >= 0 {
+			idStr = name[:dot]
+		}
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			continue
+		}
+		if id > 10000 {
+			os.Remove(fmt.Sprintf("%s/%s", imageDir, name))
+		}
+	}
+}
+
 func isLogin(u User) bool {
 	return u.ID != 0
 }
@@ -305,6 +378,9 @@ func getTemplPath(filename string) string {
 func getInitialize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	dbInitialize(ctx)
+	// #4 揮発画像(id>10000)を掃除。種データの画像は遅延dumpで再生成される
+	os.MkdirAll(imageDir, 0755)
+	cleanupVolatileImages()
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -679,6 +755,11 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #4 INSERT後すぐファイル出し(POST→GET即反映)。失敗してもgetImageのDBフォールバックで配信可能
+	if err := saveImageFile(int(pid), mime, filedata); err != nil {
+		log.Print(err)
+	}
+
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
 
@@ -703,6 +784,10 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	if ext == "jpg" && post.Mime == "image/jpeg" ||
 		ext == "png" && post.Mime == "image/png" ||
 		ext == "gif" && post.Mime == "image/gif" {
+		// #4 遅延dump: 次回以降はnginxが直接配信する
+		if err := saveImageFile(post.ID, post.Mime, post.Imgdata); err != nil {
+			log.Print(err)
+		}
 		w.Header().Set("Content-Type", post.Mime)
 		_, err := w.Write(post.Imgdata)
 		if err != nil {
@@ -850,6 +935,9 @@ func main() {
 	db.SetMaxOpenConns(64)
 	db.SetMaxIdleConns(64)
 	db.SetConnMaxLifetime(0)
+
+	// #4 画像ダンプ先ディレクトリを用意
+	os.MkdirAll(imageDir, 0755)
 
 	initTemplates()
 

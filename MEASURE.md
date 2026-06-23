@@ -65,4 +65,4 @@ sudo pt-query-digest /var/log/mysql/slow.log
 ## ベンチ記録
 | # | 日時 | 施策 | スコア | success | fail | 担当 | 備考 |
 |---|------|------|--------|---------|------|------|------|
-| 0 | (取得予定) | 初期状態 | - | - | - | A | ベースライン |
+| 0 | 2026-06-23 | 初期状態(Ruby) | 565 | 562 | 4 | A | POST /login,/register timeout → #1 passhash裏付け |

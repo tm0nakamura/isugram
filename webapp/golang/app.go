@@ -96,7 +96,7 @@ type Post struct {
 	Body         string    `db:"body"`
 	Mime         string    `db:"mime"`
 	CreatedAt    time.Time `db:"created_at"`
-	CommentCount int
+	CommentCount int       `db:"comment_count"`
 	Comments     []Comment
 	User         User
 	CSRFToken    string
@@ -130,6 +130,8 @@ func dbInitialize(ctx context.Context) {
 		"DELETE FROM comments WHERE id > 100000",
 		"UPDATE users SET del_flg = 0",
 		"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
+		// #1 comment_count を実件数で再構築(削除後のpostsに対して)
+		"UPDATE posts SET comment_count = (SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id)",
 	}
 
 	for _, sql := range sqls {
@@ -259,27 +261,6 @@ func fetchUsersByIDs(ctx context.Context, ids []int) (map[int]User, error) {
 	return m, nil
 }
 
-// fetchCommentCounts は comments を post_id IN (...) GROUP BY で一括集計する。
-func fetchCommentCounts(ctx context.Context, postIDs []int) (map[int]int, error) {
-	m := make(map[int]int, len(postIDs))
-	if len(postIDs) == 0 {
-		return m, nil
-	}
-	holder, args := inClause(postIDs)
-	type ccRow struct {
-		PostID int `db:"post_id"`
-		Count  int `db:"count"`
-	}
-	var rows []ccRow
-	if err := db.SelectContext(ctx, &rows, "SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN ("+holder+") GROUP BY `post_id`", args...); err != nil {
-		return nil, err
-	}
-	for _, r := range rows {
-		m[r.PostID] = r.Count
-	}
-	return m, nil
-}
-
 // #3 makePosts N+1解消: comments/users/comment_count をIN句で一括取得する。
 // 出力HTMLは元実装と完全一致(del_flg==0絞り→最大postsPerPage件, コメントは最新3件を時系列昇順)。
 func makePosts(ctx context.Context, results []Post, csrfToken string, allComments bool) ([]Post, error) {
@@ -324,11 +305,8 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 		postIDs[i] = p.ID
 	}
 
-	// コメント数を一括集計
-	counts, err := fetchCommentCounts(ctx, postIDs)
-	if err != nil {
-		return nil, err
-	}
+	// #1 コメント数は posts.comment_count(非正規化)を読むだけ。GROUP BY COUNTは廃止。
+	// p.CommentCount は feeding query で既に取得済み。
 
 	// コメントを一括取得 (created_at DESC, id DESC = 単一投稿クエリ+indexと同順)
 	holder, args := inClause(postIDs)
@@ -366,7 +344,6 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 
 	posts := make([]Post, 0, len(selected))
 	for _, p := range selected {
-		p.CommentCount = counts[p.ID]
 		cmts := cmtsByPost[p.ID]
 		for i := range cmts {
 			cmts[i].User = cusers[cmts[i].UserID]
@@ -624,7 +601,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	// #6 全件取得をやめ、users JOINでdel_flg=0を絞りLIMITで必要数だけ取得。
 	// STRAIGHT_JOINでposts主導にしidx_posts_created_atのbackward index scanを使う。
-	err := db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` FROM `posts` AS p JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT ?", postsPerPage)
+	err := db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`, p.`comment_count` FROM `posts` AS p JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT ?", postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
@@ -662,7 +639,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at`, `comment_count` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
 	if err != nil {
 		log.Print(err)
 		return
@@ -743,7 +720,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 	// #B getPostsにもgetIndex同様のJOIN+LIMITを適用(created_at <= ?は維持)
-	err = db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` FROM `posts` AS p JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 AND p.`created_at` <= ? ORDER BY p.`created_at` DESC LIMIT ?", t.Format(ISO8601Format), postsPerPage)
+	err = db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`, p.`comment_count` FROM `posts` AS p JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 AND p.`created_at` <= ? ORDER BY p.`created_at` DESC LIMIT ?", t.Format(ISO8601Format), postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
@@ -774,7 +751,7 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 	// #7 詳細表示にimgdataは不要(画像は/image/経由)。BLOBをロードしない
-	err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `id` = ?", pid)
+	err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at`, `comment_count` FROM `posts` WHERE `id` = ?", pid)
 	if err != nil {
 		log.Print(err)
 		return
@@ -944,9 +921,23 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := "INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)"
-	_, err = db.ExecContext(ctx, query, postID, me.ID, r.FormValue("comment"))
+	// #1 コメントINSERTとcomment_count+1を同一Txで確定(redirect前)。POST→GET即反映。
+	tx, err := db.BeginTxx(ctx, nil)
 	if err != nil {
+		log.Print(err)
+		return
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)", postID, me.ID, r.FormValue("comment")); err != nil {
+		tx.Rollback()
+		log.Print(err)
+		return
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE `posts` SET `comment_count` = `comment_count` + 1 WHERE `id` = ?", postID); err != nil {
+		tx.Rollback()
+		log.Print(err)
+		return
+	}
+	if err = tx.Commit(); err != nil {
 		log.Print(err)
 		return
 	}

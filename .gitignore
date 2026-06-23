@@ -1,0 +1,19 @@
+# dependencies / build artifacts (regenerable)
+**/vendor/
+**/node_modules/
+**/.venv/
+**/__pycache__/
+*.pyc
+webapp/golang/app
+webapp/golang/pkg/
+benchmarker/bin/
+benchmarker/*.test
+
+# benchmark data / db dump (downloaded via make init)
+benchmarker/userdata/img/
+benchmarker/userdata/img.zip
+webapp/sql/dump.sql
+webapp/sql/dump.sql.bz2
+
+# logs / runtime
+*.log

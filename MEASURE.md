@@ -96,3 +96,22 @@ sudo pt-query-digest /var/log/mysql/slow.log
 | G | Go実装へ切替(systemctl) | 戦略 | Rubyの2〜5倍。#1-9流用可 |
 
 注: flush_log_at_trx_commit は再起動データ保全のため 1 or 2 を維持（0は不可）。
+
+## 言語方針: Go採用（2026-06-23 決定）
+稼働実装をRuby→**Go(webapp/golang/)**に切替える。以降Bはwebapp/golang/を編集、CはアプリをisugoとしてrestartするService=isu-go。
+切替: `sudo systemctl stop isu-ruby; sudo systemctl disable isu-ruby; cd webapp/golang && make; sudo systemctl enable isu-go; sudo systemctl start isu-go`
+ビルド: `cd webapp/golang && make`（go build -o app）。コード変更後は `make && sudo systemctl restart isu-go`
+
+### Go版ボトルネック（app.go、行番号確認済み）
+| # | 施策 | 箇所 |
+|---|------|------|
+| 1 | digest()のopenssl shell-out廃止→crypto/sha512 | app.go:122-139 |
+| G1 | テンプレを毎req ParseFiles→起動時1回パース(global) | app.go:281,321,413,498,554,595,768 (template.Must×7) |
+| G2 | DB接続プール設定 SetMaxOpenConns/Idle/ConnMaxLifetime | main() app.go:847付近 |
+| 2 | index追加(posts/comments) ※SQLをrepoに保存し適用 | DB |
+| 3 | makePosts N+1解消(comments/usersをIN一括) | app.go:178-227 |
+| 6 | getIndex 全件→JOINでdel_flg絞り+LIMIT | app.go:391-401 |
+| 7 | SELECT * のimgdata不要ロード回避(一覧/詳細) | app.go:570,696 |
+| 4 | 画像ファイル出し(upload時+既存dump)→nginx配信(設定済) | app.go:663,686 |
+| 9 | getSessionUserのcache | app.go:147-163 |
+| B | comment_count非正規化/cache | app.go:182 |

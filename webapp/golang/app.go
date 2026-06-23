@@ -742,7 +742,8 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
+	// #B getPostsにもgetIndex同様のJOIN+LIMITを適用(created_at <= ?は維持)
+	err = db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` FROM `posts` AS p JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 AND p.`created_at` <= ? ORDER BY p.`created_at` DESC LIMIT ?", t.Format(ISO8601Format), postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return

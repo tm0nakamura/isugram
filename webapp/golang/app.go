@@ -817,6 +817,18 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
 }
 
+// #12 /@account のキャッシュ。
+// post一覧: user_posts:{uid} (本人の新規投稿でDelete)。
+// 集計: account_stats:{uid} = {本人のコメント数, 本人postへのコメント数}。
+//   コメント投稿時にcommenterとpost所有者の両方をDeleteしてPOST→GET即反映。
+func userPostsCacheKey(uid int) string    { return fmt.Sprintf("user_posts:%d", uid) }
+func accountStatsCacheKey(uid int) string { return fmt.Sprintf("account_stats:%d", uid) }
+
+type accountStats struct {
+	CommentCount   int `json:"c"`
+	CommentedCount int `json:"d"`
+}
+
 func getAccountName(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	accountName := r.PathValue("accountName")
@@ -833,13 +845,20 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := []Post{}
-
-	err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at`, `comment_count` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
-	if err != nil {
-		log.Print(err)
-		return
+	// #12 post一覧をキャッシュ(本人の新規投稿でDelete)。comment_count等はmakePosts内で導出。
+	postsKey := userPostsCacheKey(user.ID)
+	var results []Post
+	if cached := getPostListCache(postsKey); cached != nil {
+		results = cached
+	} else {
+		err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at`, `comment_count` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		setPostListCache(postsKey, results)
 	}
+	postCount := len(results) // 本人の全投稿数(別クエリ廃止)
 
 	posts, err := makePosts(ctx, results, getCSRFToken(r), false)
 	if err != nil {
@@ -847,39 +866,39 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #12 集計(本人コメント数/本人postへのコメント数)をキャッシュ
 	commentCount := 0
-	err = db.GetContext(ctx, &commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
-	if err != nil {
-		log.Print(err)
-		return
-	}
-
-	postIDs := []int{}
-	err = db.SelectContext(ctx, &postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID)
-	if err != nil {
-		log.Print(err)
-		return
-	}
-	postCount := len(postIDs)
-
 	commentedCount := 0
-	if postCount > 0 {
-		s := []string{}
-		for range postIDs {
-			s = append(s, "?")
+	statsKey := accountStatsCacheKey(user.ID)
+	hit := false
+	if item, e := memcacheClient.Get(statsKey); e == nil {
+		var st accountStats
+		if json.Unmarshal(item.Value, &st) == nil {
+			commentCount = st.CommentCount
+			commentedCount = st.CommentedCount
+			hit = true
 		}
-		placeholder := strings.Join(s, ", ")
-
-		// convert []int -> []any
-		args := make([]any, len(postIDs))
-		for i, v := range postIDs {
-			args[i] = v
-		}
-
-		err = db.GetContext(ctx, &commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...)
+	}
+	if !hit {
+		err = db.GetContext(ctx, &commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
 		if err != nil {
 			log.Print(err)
 			return
+		}
+		if postCount > 0 {
+			ids := make([]int, len(results))
+			for i, p := range results {
+				ids[i] = p.ID
+			}
+			holder, args := inClause(ids)
+			err = db.GetContext(ctx, &commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+holder+")", args...)
+			if err != nil {
+				log.Print(err)
+				return
+			}
+		}
+		if b, e := json.Marshal(accountStats{CommentCount: commentCount, CommentedCount: commentedCount}); e == nil {
+			memcacheClient.Set(&memcache.Item{Key: statsKey, Value: b, Expiration: 300})
 		}
 	}
 
@@ -1068,6 +1087,8 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 
 	// 新規投稿で一覧キャッシュを世代交代(POST→GET即反映)
 	incrPostListGen()
+	// #12 本人ページ(/@account)のpost一覧キャッシュを無効化(POST→GET即反映)
+	memcacheClient.Delete(userPostsCacheKey(me.ID))
 
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
@@ -1135,6 +1156,13 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	memcacheClient.Delete(commentsCacheKey(postID))
+
+	// #12 /@account 集計を即反映: commenter(本人コメント数)とpost所有者(本人postへのコメント数)を無効化
+	memcacheClient.Delete(accountStatsCacheKey(me.ID))
+	var ownerID int
+	if e := db.GetContext(ctx, &ownerID, "SELECT `user_id` FROM `posts` WHERE `id` = ?", postID); e == nil && ownerID != me.ID {
+		memcacheClient.Delete(accountStatsCacheKey(ownerID))
+	}
 
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }

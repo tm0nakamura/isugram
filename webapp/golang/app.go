@@ -846,6 +846,11 @@ func main() {
 	}
 	defer db.Close()
 
+	// G2: コネクションプール設定（張り直し削減・並列度確保）
+	db.SetMaxOpenConns(64)
+	db.SetMaxIdleConns(64)
+	db.SetConnMaxLifetime(0)
+
 	initTemplates()
 
 	r := chi.NewRouter()

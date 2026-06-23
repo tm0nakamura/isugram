@@ -133,6 +133,8 @@ func dbInitialize(ctx context.Context) {
 		"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
 		// #1 comment_count 再構築: LEFT JOIN集計でN×サブクエリを回避
 		"UPDATE posts p LEFT JOIN (SELECT post_id, COUNT(*) AS cnt FROM comments GROUP BY post_id) c ON p.id = c.post_id SET p.comment_count = COALESCE(c.cnt, 0)",
+		// imgdata排除後の物理ページ回収: postsをコンパクト化しバッファプール効率を最大化
+		"OPTIMIZE TABLE posts",
 	}
 
 	for _, sql := range sqls {
@@ -154,9 +156,13 @@ func tryLogin(ctx context.Context, accountName, password string) *User {
 	}
 }
 
+var (
+	reAccountName = regexp.MustCompile(`\A[0-9a-zA-Z_]{3,}\z`)
+	rePassword    = regexp.MustCompile(`\A[0-9a-zA-Z_]{6,}\z`)
+)
+
 func validateUser(accountName, password string) bool {
-	return regexp.MustCompile(`\A[0-9a-zA-Z_]{3,}\z`).MatchString(accountName) &&
-		regexp.MustCompile(`\A[0-9a-zA-Z_]{6,}\z`).MatchString(password)
+	return reAccountName.MatchString(accountName) && rePassword.MatchString(password)
 }
 
 // 今回のGo実装では言語側のエスケープの仕組みが使えないのでOSコマンドインジェクション対策できない

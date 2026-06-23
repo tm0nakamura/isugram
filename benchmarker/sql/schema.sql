@@ -28,3 +28,9 @@ CREATE TABLE comments (
   `comment` text NOT NULL,
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) DEFAULT CHARSET=utf8mb4;
+
+-- #2 secondary indexes (B: app/SQL)
+ALTER TABLE posts ADD INDEX idx_posts_created_at (created_at);
+ALTER TABLE posts ADD INDEX idx_posts_user_id (user_id);
+ALTER TABLE comments ADD INDEX idx_comments_post_id_created_at (post_id, created_at);
+ALTER TABLE comments ADD INDEX idx_comments_user_id (user_id);

@@ -332,31 +332,83 @@ func setPostListCache(key string, posts []Post) {
 	memcacheClient.Set(&memcache.Item{Key: key, Value: b, Expiration: 300})
 }
 
-// fetchLiveCommentCounts: キャッシュヒット時にcomment_countをDBからIN句一括取得。
-func fetchLiveCommentCounts(ctx context.Context, posts []Post) {
-	if len(posts) == 0 {
-		return
+// #11 コメントのpost単位キャッシュ。値は当該postの全コメント(created_at DESC, id DESC)。
+// POST /comment 時に該当キーをDeleteして即時無効化(POST→GET即反映)。
+// comment_count はこのキャッシュの件数(len)から導出するため posts.comment_count は読まない。
+type cachedComment struct {
+	ID        int       `json:"i"`
+	PostID    int       `json:"p"`
+	UserID    int       `json:"u"`
+	Comment   string    `json:"c"`
+	CreatedAt time.Time `json:"t"`
+}
+
+func commentsCacheKey(postID int) string {
+	return fmt.Sprintf("comments:%d", postID)
+}
+
+func encodeComments(cmts []Comment) []byte {
+	cc := make([]cachedComment, len(cmts))
+	for i, c := range cmts {
+		cc[i] = cachedComment{ID: c.ID, PostID: c.PostID, UserID: c.UserID, Comment: c.Comment, CreatedAt: c.CreatedAt}
 	}
-	ids := make([]int, len(posts))
-	for i, p := range posts {
-		ids[i] = p.ID
+	b, _ := json.Marshal(cc)
+	return b
+}
+
+func decodeComments(b []byte) ([]Comment, bool) {
+	var cc []cachedComment
+	if json.Unmarshal(b, &cc) != nil {
+		return nil, false
 	}
-	holder, args := inClause(ids)
-	type row struct {
-		ID           int `db:"id"`
-		CommentCount int `db:"comment_count"`
+	cmts := make([]Comment, len(cc))
+	for i, c := range cc {
+		cmts[i] = Comment{ID: c.ID, PostID: c.PostID, UserID: c.UserID, Comment: c.Comment, CreatedAt: c.CreatedAt}
 	}
-	var rows []row
-	if err := db.SelectContext(ctx, &rows, "SELECT `id`, `comment_count` FROM `posts` WHERE `id` IN ("+holder+")", args...); err != nil {
-		return
+	return cmts, true
+}
+
+// getCommentsForPosts は postID->全コメント(created_at DESC,id DESC) を返す。
+// memcacheミスしたpostのみDBを一括読みして個別にキャッシュする。
+func getCommentsForPosts(ctx context.Context, postIDs []int) map[int][]Comment {
+	result := make(map[int][]Comment, len(postIDs))
+	keys := make([]string, 0, len(postIDs))
+	for _, id := range postIDs {
+		keys = append(keys, commentsCacheKey(id))
 	}
-	cmap := make(map[int]int, len(rows))
-	for _, r := range rows {
-		cmap[r.ID] = r.CommentCount
+	items, _ := memcacheClient.GetMulti(keys)
+	var miss []int
+	for _, id := range postIDs {
+		if it, ok := items[commentsCacheKey(id)]; ok {
+			if cmts, ok2 := decodeComments(it.Value); ok2 {
+				result[id] = cmts
+				continue
+			}
+		}
+		miss = append(miss, id)
 	}
-	for i := range posts {
-		posts[i].CommentCount = cmap[posts[i].ID]
+	if len(miss) > 0 {
+		holder, args := inClause(miss)
+		var all []Comment
+		if err := db.SelectContext(ctx, &all,
+			"SELECT * FROM `comments` WHERE `post_id` IN ("+holder+") ORDER BY `created_at` DESC, `id` DESC", args...); err != nil {
+			log.Print(err)
+			for _, id := range miss {
+				result[id] = nil
+			}
+			return result
+		}
+		grouped := make(map[int][]Comment, len(miss))
+		for _, c := range all {
+			grouped[c.PostID] = append(grouped[c.PostID], c)
+		}
+		for _, id := range miss {
+			cmts := grouped[id] // 0件ならnil → 空配列としてキャッシュ
+			result[id] = cmts
+			memcacheClient.Set(&memcache.Item{Key: commentsCacheKey(id), Value: encodeComments(cmts)})
+		}
 	}
+	return result
 }
 
 // inClause は ids 件数分の "?" プレースホルダ文字列と引数列を返す。
@@ -446,32 +498,23 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 		postIDs[i] = p.ID
 	}
 
-	// #1 コメント数は posts.comment_count(非正規化)を読むだけ。GROUP BY COUNTは廃止。
-	// p.CommentCount は feeding query で既に取得済み。
+	// #11 コメントはpost単位でmemcacheに全件キャッシュ。ミスしたpostのみDB一括読み。
+	cmtsAll := getCommentsForPosts(ctx, postIDs)
 
-	// コメントを一括取得 (created_at DESC, id DESC = 単一投稿クエリ+indexと同順)
-	holder, args := inClause(postIDs)
-	var allCmts []Comment
-	err = db.SelectContext(ctx, &allCmts,
-		"SELECT * FROM `comments` WHERE `post_id` IN ("+holder+") ORDER BY `created_at` DESC, `id` DESC", args...)
-	if err != nil {
-		return nil, err
-	}
-
-	// post_id でグルーピング(取得順を維持)、allComments以外は3件に制限
-	cmtsByPost := make(map[int][]Comment, len(postIDs))
-	for _, c := range allCmts {
-		if !allComments && len(cmtsByPost[c.PostID]) >= 3 {
-			continue
-		}
-		cmtsByPost[c.PostID] = append(cmtsByPost[c.PostID], c)
-	}
-
-	// コメント投稿者をIN一括取得
+	// 表示件数を確定(index/posts=最新3件, 詳細=全件)。表示コメントの投稿者をIN一括取得。
+	display := make(map[int][]Comment, len(postIDs))
 	cuSeen := make(map[int]bool)
 	cuIDs := []int{}
-	for _, cmts := range cmtsByPost {
-		for _, c := range cmts {
+	for _, id := range postIDs {
+		all := cmtsAll[id]
+		var shown []Comment
+		if !allComments && len(all) > 3 {
+			shown = append(shown, all[:3]...) // 新規backing arrayへコピー(キャッシュ実体を汚さない)
+		} else {
+			shown = append(shown, all...)
+		}
+		display[id] = shown
+		for _, c := range shown {
 			if !cuSeen[c.UserID] {
 				cuSeen[c.UserID] = true
 				cuIDs = append(cuIDs, c.UserID)
@@ -485,15 +528,17 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 
 	posts := make([]Post, 0, len(selected))
 	for _, p := range selected {
-		cmts := cmtsByPost[p.ID]
-		for i := range cmts {
-			cmts[i].User = cusers[cmts[i].UserID]
+		shown := display[p.ID]
+		for i := range shown {
+			shown[i].User = cusers[shown[i].UserID]
 		}
 		// reverse (created_at DESC -> ASC)
-		for i, j := 0, len(cmts)-1; i < j; i, j = i+1, j-1 {
-			cmts[i], cmts[j] = cmts[j], cmts[i]
+		for i, j := 0, len(shown)-1; i < j; i, j = i+1, j-1 {
+			shown[i], shown[j] = shown[j], shown[i]
 		}
-		p.Comments = cmts
+		p.Comments = shown
+		// #11 comment_count はキャッシュ全件数から導出(posts.comment_count列は読まない)
+		p.CommentCount = len(cmtsAll[p.ID])
 		posts = append(posts, p)
 	}
 
@@ -746,8 +791,8 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	var results []Post
 	if cached := getPostListCache(cacheKey); cached != nil {
+		// comment_countはmakePosts内でコメントキャッシュ件数から導出する
 		results = cached
-		fetchLiveCommentCounts(ctx, results)
 	} else {
 		// FORCE INDEX: ANALYZEしても自動選択されないのでヒント必須
 		err := db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`, p.`comment_count` FROM `posts` AS p FORCE INDEX (`idx_posts_created_at`) JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT ?", postsPerPage)
@@ -874,8 +919,8 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 
 	var results []Post
 	if cached := getPostListCache(cacheKey); cached != nil {
+		// comment_countはmakePosts内でコメントキャッシュ件数から導出する
 		results = cached
-		fetchLiveCommentCounts(ctx, results)
 	} else {
 		err = db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`, p.`comment_count` FROM `posts` AS p FORCE INDEX (`idx_posts_created_at`) JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 AND p.`created_at` <= ? ORDER BY p.`created_at` DESC LIMIT ?", t.Format(ISO8601Format), postsPerPage)
 		if err != nil {
@@ -1083,26 +1128,13 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// #1 コメントINSERTとcomment_count+1を同一Txで確定(redirect前)。POST→GET即反映。
-	tx, err := db.BeginTxx(ctx, nil)
-	if err != nil {
+	// #11 コメントをINSERT(autocommit)後、該当postのコメントキャッシュを無効化。
+	// 次GETで全件再取得され、表示・件数とも即反映(POST→GET即反映)。comment_count列の更新は不要。
+	if _, err := db.ExecContext(ctx, "INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)", postID, me.ID, r.FormValue("comment")); err != nil {
 		log.Print(err)
 		return
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)", postID, me.ID, r.FormValue("comment")); err != nil {
-		tx.Rollback()
-		log.Print(err)
-		return
-	}
-	if _, err = tx.ExecContext(ctx, "UPDATE `posts` SET `comment_count` = `comment_count` + 1 WHERE `id` = ?", postID); err != nil {
-		tx.Rollback()
-		log.Print(err)
-		return
-	}
-	if err = tx.Commit(); err != nil {
-		log.Print(err)
-		return
-	}
+	memcacheClient.Delete(commentsCacheKey(postID))
 
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }

@@ -622,7 +622,9 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
+	// #6 全件取得をやめ、users JOINでdel_flg=0を絞りLIMITで必要数だけ取得。
+	// STRAIGHT_JOINでposts主導にしidx_posts_created_atのbackward index scanを使う。
+	err := db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` FROM `posts` AS p JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT ?", postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return

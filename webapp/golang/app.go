@@ -843,7 +843,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		query,
 		me.ID,
 		mime,
-		filedata,
+		[]byte{}, // 【3】imgdataはDBに保存しない。ファイルが正本。
 		r.FormValue("body"),
 	)
 	if err != nil {
@@ -887,6 +887,11 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	if ext == "jpg" && post.Mime == "image/jpeg" ||
 		ext == "png" && post.Mime == "image/png" ||
 		ext == "gif" && post.Mime == "image/gif" {
+		if len(post.Imgdata) == 0 {
+			// 【3】imgdataなし=ファイル正本の新規投稿。nginxが配信するはず。
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		// #4 遅延dump: 次回以降はnginxが直接配信する (post.IDは未取得なのでpidを使う)
 		if err := saveImageFile(pid, post.Mime, post.Imgdata); err != nil {
 			log.Print(err)

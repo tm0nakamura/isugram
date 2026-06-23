@@ -158,3 +158,8 @@ sudo pt-query-digest /var/log/mysql/slow.log
 2. 画像ファイルは言語非依存で永続(nginx静的配信)。#4完了時にAがbuffer_pool増量を同時実施
 3. Ruby頭打ち後、確定最適化一式(#1/#3/#6/#4/#9 + G1テンプレ事前パース/G2 DBプール)をapp.goへ一括移植→ビルド&動作確認→Aの号令でC切替(stop/disable isu-ruby; make; enable/start isu-go)
 C: #D keepalive/#E gzip等は言語非依存なので今着手可。item G(切替)はB完走確認後のA号令まで実行しない。
+
+## bench #5 (2026-06-23): 272899 / success 257258 / fail 0
+- ①②③(user在メモリ+コメントcache)+worker_connections8192+unix socket+perf_schema OFF
+- 転換点: DB時間ほぼ消滅(slow top 2s)。ボトルネック=アプリCPU(テンプレ描画)。alp SUM top: GET/ 80s, /posts/N 42s, /posts 36s, /@user 28s(avg最大=⑤), POST/login 28s
+- 次: pprof CPU採取(今はCPUバウンドで有効) → テンプレ描画コスト削減 / ⑤ /@user統合

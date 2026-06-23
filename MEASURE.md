@@ -54,13 +54,20 @@ sudo pt-query-digest /var/log/mysql/slow.log
 | 1 | パスワードhashのopenssl shell-out廃止→Digest::SHA512 | B | app.rb:79-82 毎ログインでプロセスfork×2 |
 | 2 | 2026-06-23 | Go切替+#1/#3/#6/#4/G1/G2移植 | 19941 | 19735 | 98 | B/C | Go稼働。fail原因=画像権限(CreateTemp 0600→nginx EACCES)+ベンチ中restartの502。要修正 |
 | 3 | 2026-06-23 | 画像権限修正+#4完成(nginx静的)+#7+#9cache+OPTIMIZE(init)+regexp | 93198 | 88990 | 0 | B/C | Go稼働。posts.ibd 1.2GB→7MB、fail0、disk健全 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | imgdata排除(nginx画像配信)+comment_count非正規化+initialize高速化+buffer_pool1.5G | 223666 | 212330 | 0 | A | initialize 0.176s。クリーンpass。binログ無効でディスク安定 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | Go #3/#6/#7移植+#4権限修正 | 46715 | 45131 | 47 | B/C | 画像エラー解消。fail=nginx FD枯渇(Too many open files)。getPosts未LIMITも15s |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 2 | index追加 posts(created_at)/posts(user_id)/comments(post_id,created_at)/comments(user_id) | B | 全テーブルindex無し |
 | 3 | 2026-06-23 | 画像権限修正+#4完成(nginx静的)+#7+#9cache+OPTIMIZE(init)+regexp | 93198 | 88990 | 0 | B/C | Go稼働。posts.ibd 1.2GB→7MB、fail0、disk健全 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | imgdata排除(nginx画像配信)+comment_count非正規化+initialize高速化+buffer_pool1.5G | 223666 | 212330 | 0 | A | initialize 0.176s。クリーンpass。binログ無効でディスク安定 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | Go #3/#6/#7移植+#4権限修正 | 46715 | 45131 | 47 | B/C | 画像エラー解消。fail=nginx FD枯渇(Too many open files)。getPosts未LIMITも15s |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | make_posts のN+1解消→IN句一括 or JOIN | B | app.rb:102-132 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 4 | 画像をファイル出し→nginx静的配信 | B→C | DB BLOB配信撤廃 |
 | 5 | 静的アセットをnginx直配信 | C | 今はlocation /で全部appにproxy |
 | 6 | GET / の全件取得→JOINでdel_flg絞り+LIMIT | B | app.rb:228-229 |
@@ -75,8 +82,11 @@ sudo pt-query-digest /var/log/mysql/slow.log
 | 1 | 2026-06-23 | #2 index + #3 N+1解消 + #6 GET/最適化 + nginx(#4準備) | 18748 | 17738 | 0 | B/C | Ruby稼働。fail=0、login/register timeout解消 |
 | 2 | 2026-06-23 | Go切替+#1/#3/#6/#4/G1/G2移植 | 19941 | 19735 | 98 | B/C | Go稼働。fail原因=画像権限(CreateTemp 0600→nginx EACCES)+ベンチ中restartの502。要修正 |
 | 3 | 2026-06-23 | 画像権限修正+#4完成(nginx静的)+#7+#9cache+OPTIMIZE(init)+regexp | 93198 | 88990 | 0 | B/C | Go稼働。posts.ibd 1.2GB→7MB、fail0、disk健全 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | imgdata排除(nginx画像配信)+comment_count非正規化+initialize高速化+buffer_pool1.5G | 223666 | 212330 | 0 | A | initialize 0.176s。クリーンpass。binログ無効でディスク安定 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | Go #3/#6/#7移植+#4権限修正 | 46715 | 45131 | 47 | B/C | 画像エラー解消。fail=nginx FD枯渇(Too many open files)。getPosts未LIMITも15s |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 
 ## レギュレーション（厳守）
 **変更禁止:** URI(ポート/パス) / HTML DOM構造 / JS・CSS内容 / 画像・メディア内容
@@ -119,15 +129,22 @@ sudo pt-query-digest /var/log/mysql/slow.log
 | 1 | digest()のopenssl shell-out廃止→crypto/sha512 | app.go:122-139 |
 | 2 | 2026-06-23 | Go切替+#1/#3/#6/#4/G1/G2移植 | 19941 | 19735 | 98 | B/C | Go稼働。fail原因=画像権限(CreateTemp 0600→nginx EACCES)+ベンチ中restartの502。要修正 |
 | 3 | 2026-06-23 | 画像権限修正+#4完成(nginx静的)+#7+#9cache+OPTIMIZE(init)+regexp | 93198 | 88990 | 0 | B/C | Go稼働。posts.ibd 1.2GB→7MB、fail0、disk健全 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | imgdata排除(nginx画像配信)+comment_count非正規化+initialize高速化+buffer_pool1.5G | 223666 | 212330 | 0 | A | initialize 0.176s。クリーンpass。binログ無効でディスク安定 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | Go #3/#6/#7移植+#4権限修正 | 46715 | 45131 | 47 | B/C | 画像エラー解消。fail=nginx FD枯渇(Too many open files)。getPosts未LIMITも15s |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | G1 | テンプレを毎req ParseFiles→起動時1回パース(global) | app.go:281,321,413,498,554,595,768 (template.Must×7) |
 | G2 | DB接続プール設定 SetMaxOpenConns/Idle/ConnMaxLifetime | main() app.go:847付近 |
 | 2 | index追加(posts/comments) ※SQLをrepoに保存し適用 | DB |
 | 3 | 2026-06-23 | 画像権限修正+#4完成(nginx静的)+#7+#9cache+OPTIMIZE(init)+regexp | 93198 | 88990 | 0 | B/C | Go稼働。posts.ibd 1.2GB→7MB、fail0、disk健全 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | imgdata排除(nginx画像配信)+comment_count非正規化+initialize高速化+buffer_pool1.5G | 223666 | 212330 | 0 | A | initialize 0.176s。クリーンpass。binログ無効でディスク安定 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | 2026-06-23 | Go #3/#6/#7移植+#4権限修正 | 46715 | 45131 | 47 | B/C | 画像エラー解消。fail=nginx FD枯渇(Too many open files)。getPosts未LIMITも15s |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 3 | makePosts N+1解消(comments/usersをIN一括) | app.go:178-227 |
+| 4 | 2026-06-23 | タイムラインcache+interpolateParams+unix socket+imgdata DB停止 | 233955 | 221636 | 0 | B/C | Go稼働。93198の2.5倍、fail0 |
 | 6 | getIndex 全件→JOINでdel_flg絞り+LIMIT | app.go:391-401 |
 | 7 | SELECT * のimgdata不要ロード回避(一覧/詳細) | app.go:570,696 |
 | 4 | 画像ファイル出し(upload時+既存dump)→nginx配信(設定済) | app.go:663,686 |

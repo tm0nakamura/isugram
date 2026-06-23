@@ -1,0 +1,13 @@
+# ISUCON tuning (Session C) — overrides mysqld.cnf (loaded alphabetically after it)
+[mysqld]
+# --- 計測用 slow query log（A の pt-query-digest 用） ---
+slow_query_log          = 1
+slow_query_log_file     = /var/log/mysql/mysql-slow.log
+long_query_time         = 0
+
+# --- InnoDB チューニング（2vCPU / 3.7GiB RAM） ---
+innodb_buffer_pool_size = 1G
+# 各コミットを OS キャッシュへ flush（mysqld 再起動では失われない＝再起動耐性OK、ディスク同期は1秒毎）
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method     = O_DIRECT
+innodb_log_buffer_size  = 16M

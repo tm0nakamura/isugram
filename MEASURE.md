@@ -116,3 +116,11 @@ sudo pt-query-digest /var/log/mysql/slow.log
 | 4 | 画像ファイル出し(upload時+既存dump)→nginx配信(設定済) | app.go:663,686 |
 | 9 | getSessionUserのcache | app.go:147-163 |
 | B | comment_count非正規化/cache | app.go:182 |
+
+## A判断(2026-06-23): Go切替は保留、順序を確定
+現状: isu-ruby active / isu-go inactive。18748点の#3/#6はapp.rbに在り、app.goは#1着手のみ。
+→ **今Go切替すると退行**するため保留。順序:
+1. Ruby稼働のまま B が #4(画像ファイル出し,atomic)→#9(cache) を完成、都度Aがベンチ
+2. 画像ファイルは言語非依存で永続(nginx静的配信)。#4完了時にAがbuffer_pool増量を同時実施
+3. Ruby頭打ち後、確定最適化一式(#1/#3/#6/#4/#9 + G1テンプレ事前パース/G2 DBプール)をapp.goへ一括移植→ビルド&動作確認→Aの号令でC切替(stop/disable isu-ruby; make; enable/start isu-go)
+C: #D keepalive/#E gzip等は言語非依存なので今着手可。item G(切替)はB完走確認後のA号令まで実行しない。

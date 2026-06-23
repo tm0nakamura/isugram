@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -192,28 +193,67 @@ func getSession(r *http.Request) *sessions.Session {
 	return session
 }
 
-func userCacheKey(uid interface{}) string {
-	return fmt.Sprintf("user:%v", uid)
+// #10 全ユーザをインメモリ常駐。users(1000行)は起動時/initialize時に一括ロードし、
+// makePosts/getSessionUserのid参照をDBゼロにする。新規登録ユーザはread-throughで取り込む。
+// del_flg変更(ban)はマップを直接更新してPOST→GET即反映を維持する。
+var userCache = struct {
+	mu   sync.RWMutex
+	byID map[int]User
+}{byID: map[int]User{}}
+
+func loadAllUsers(ctx context.Context) {
+	var users []User
+	if err := db.SelectContext(ctx, &users, "SELECT * FROM `users`"); err != nil {
+		log.Print(err)
+		return
+	}
+	m := make(map[int]User, len(users))
+	for _, u := range users {
+		m[u.ID] = u
+	}
+	userCache.mu.Lock()
+	userCache.byID = m
+	userCache.mu.Unlock()
 }
 
-// #9 ユーザをmemcachedにキャッシュ。del_flg変更時(postAdminBanned/initialize)に無効化する。
-func fetchUserByID(ctx context.Context, uid interface{}) User {
-	key := userCacheKey(uid)
-	if item, err := memcacheClient.Get(key); err == nil {
-		var u User
-		if json.Unmarshal(item.Value, &u) == nil {
-			return u
-		}
+func toInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
 	}
+	return 0, false
+}
 
-	u := User{}
-	if err := db.GetContext(ctx, &u, "SELECT * FROM `users` WHERE `id` = ?", uid); err != nil {
+// getCachedUserByID: マップ参照→ミス時のみDB読み(新規登録ユーザ)。
+func getCachedUserByID(ctx context.Context, id int) (User, bool) {
+	userCache.mu.RLock()
+	u, ok := userCache.byID[id]
+	userCache.mu.RUnlock()
+	if ok {
+		return u, true
+	}
+	var uu User
+	if err := db.GetContext(ctx, &uu, "SELECT * FROM `users` WHERE `id` = ?", id); err != nil {
+		return User{}, false
+	}
+	userCache.mu.Lock()
+	userCache.byID[uu.ID] = uu
+	userCache.mu.Unlock()
+	return uu, true
+}
+
+func fetchUserByID(ctx context.Context, uid interface{}) User {
+	id, ok := toInt(uid)
+	if !ok {
 		return User{}
 	}
-
-	if b, err := json.Marshal(u); err == nil {
-		_ = memcacheClient.Set(&memcache.Item{Key: key, Value: b})
-	}
+	u, _ := getCachedUserByID(ctx, id)
 	return u
 }
 
@@ -330,19 +370,34 @@ func inClause(ids []int) (string, []any) {
 	return strings.Join(holders, ","), args
 }
 
-// fetchUsersByIDs は users を id IN (...) で一括取得し id->User で返す。
+// fetchUsersByIDs は id->User をインメモリマップから返す。ミスしたidのみDBを一括読みして取り込む。
 func fetchUsersByIDs(ctx context.Context, ids []int) (map[int]User, error) {
 	m := make(map[int]User, len(ids))
 	if len(ids) == 0 {
 		return m, nil
 	}
-	holder, args := inClause(ids)
-	var users []User
-	if err := db.SelectContext(ctx, &users, "SELECT * FROM `users` WHERE `id` IN ("+holder+")", args...); err != nil {
-		return nil, err
+	var miss []int
+	userCache.mu.RLock()
+	for _, id := range ids {
+		if u, ok := userCache.byID[id]; ok {
+			m[id] = u
+		} else {
+			miss = append(miss, id)
+		}
 	}
-	for _, u := range users {
-		m[u.ID] = u
+	userCache.mu.RUnlock()
+	if len(miss) > 0 {
+		holder, args := inClause(miss)
+		var users []User
+		if err := db.SelectContext(ctx, &users, "SELECT * FROM `users` WHERE `id` IN ("+holder+")", args...); err != nil {
+			return nil, err
+		}
+		userCache.mu.Lock()
+		for _, u := range users {
+			userCache.byID[u.ID] = u
+			m[u.ID] = u
+		}
+		userCache.mu.Unlock()
 	}
 	return m, nil
 }
@@ -559,8 +614,11 @@ func getTemplPath(filename string) string {
 func getInitialize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	dbInitialize(ctx)
-	// #9 dbInitializeでdel_flgが一括更新されるためユーザキャッシュを全消去
+	// dbInitializeでusers/posts/commentsがリセットされるため全キャッシュを破棄
+	// (タイムライン一覧/コメント/post_gen/session)
 	memcacheClient.FlushAll()
+	// #10 リセット後のusersをインメモリへ再ロード
+	loadAllUsers(ctx)
 	// #4 揮発画像(id>10000)を掃除。種データの画像は遅延dumpで再生成される
 	os.MkdirAll(imageDir, 0755)
 	cleanupVolatileImages()
@@ -1104,8 +1162,15 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 
 	for _, id := range r.Form["uid[]"] {
 		db.ExecContext(ctx, query, 1, id)
-		// #9 del_flg変更したのでユーザキャッシュを無効化(POST→GET即反映)
-		memcacheClient.Delete(userCacheKey(id))
+		// #10 del_flg変更をインメモリマップへ反映(POST→GET即反映)
+		if idInt, err := strconv.Atoi(id); err == nil {
+			userCache.mu.Lock()
+			if u, ok := userCache.byID[idInt]; ok {
+				u.DelFlg = 1
+				userCache.byID[idInt] = u
+			}
+			userCache.mu.Unlock()
+		}
 	}
 	// banで可視投稿一覧が変わるため世代交代
 	incrPostListGen()
@@ -1164,6 +1229,9 @@ func main() {
 
 	// #4 画像ダンプ先ディレクトリを用意
 	os.MkdirAll(imageDir, 0755)
+
+	// #10 起動時に全ユーザをインメモリへロード
+	loadAllUsers(context.Background())
 
 	initTemplates()
 

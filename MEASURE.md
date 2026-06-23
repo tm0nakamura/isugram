@@ -66,6 +66,7 @@ sudo pt-query-digest /var/log/mysql/slow.log
 | # | 日時 | 施策 | スコア | success | fail | 担当 | 備考 |
 |---|------|------|--------|---------|------|------|------|
 | 0 | 2026-06-23 | 初期状態(Ruby) | 565 | 562 | 4 | A | POST /login,/register timeout → #1 passhash裏付け |
+| 1 | 2026-06-23 | #2 index + #3 N+1解消 + #6 GET/最適化 + nginx(#4準備) | 18748 | 17738 | 0 | B/C | Ruby稼働。fail=0、login/register timeout解消 |
 
 ## レギュレーション（厳守）
 **変更禁止:** URI(ポート/パス) / HTML DOM構造 / JS・CSS内容 / 画像・メディア内容

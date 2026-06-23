@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"net/url"
@@ -1315,5 +1316,15 @@ func main() {
 	r.Mount("/", http.FileServer(http.Dir("../public")))
 
 	go http.ListenAndServe("localhost:6060", nil)
-	log.Fatal(http.ListenAndServe(":8080", r))
+
+	const sockPath = "/run/isucon/app.sock"
+	_ = os.Remove(sockPath)                 // 古いソケット除去
+	ln, err := net.Listen("unix", sockPath) // unixソケットでListen
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := os.Chmod(sockPath, 0666); err != nil { // nginx(www-data)接続可
+		log.Fatal(err)
+	}
+	log.Fatal(http.Serve(ln, r))
 }

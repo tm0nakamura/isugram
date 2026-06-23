@@ -53,6 +53,7 @@ sudo pt-query-digest /var/log/mysql/slow.log
 | # | 施策 | 担当 | 急所 |
 |---|------|------|------|
 | 1 | パスワードhashのopenssl shell-out廃止→Digest::SHA512 | B | app.rb:79-82 毎ログインでプロセスfork×2 |
+| 2 | 2026-06-23 | Go切替+#1/#3/#6/#4/G1/G2移植 | 19941 | 19735 | 98 | B/C | Go稼働。fail原因=画像権限(CreateTemp 0600→nginx EACCES)+ベンチ中restartの502。要修正 |
 | 2 | index追加 posts(created_at)/posts(user_id)/comments(post_id,created_at)/comments(user_id) | B | 全テーブルindex無し |
 | 3 | make_posts のN+1解消→IN句一括 or JOIN | B | app.rb:102-132 |
 | 4 | 画像をファイル出し→nginx静的配信 | B→C | DB BLOB配信撤廃 |
@@ -67,6 +68,7 @@ sudo pt-query-digest /var/log/mysql/slow.log
 |---|------|------|--------|---------|------|------|------|
 | 0 | 2026-06-23 | 初期状態(Ruby) | 565 | 562 | 4 | A | POST /login,/register timeout → #1 passhash裏付け |
 | 1 | 2026-06-23 | #2 index + #3 N+1解消 + #6 GET/最適化 + nginx(#4準備) | 18748 | 17738 | 0 | B/C | Ruby稼働。fail=0、login/register timeout解消 |
+| 2 | 2026-06-23 | Go切替+#1/#3/#6/#4/G1/G2移植 | 19941 | 19735 | 98 | B/C | Go稼働。fail原因=画像権限(CreateTemp 0600→nginx EACCES)+ベンチ中restartの502。要修正 |
 
 ## レギュレーション（厳守）
 **変更禁止:** URI(ポート/パス) / HTML DOM構造 / JS・CSS内容 / 画像・メディア内容
@@ -107,6 +109,7 @@ sudo pt-query-digest /var/log/mysql/slow.log
 | # | 施策 | 箇所 |
 |---|------|------|
 | 1 | digest()のopenssl shell-out廃止→crypto/sha512 | app.go:122-139 |
+| 2 | 2026-06-23 | Go切替+#1/#3/#6/#4/G1/G2移植 | 19941 | 19735 | 98 | B/C | Go稼働。fail原因=画像権限(CreateTemp 0600→nginx EACCES)+ベンチ中restartの502。要修正 |
 | G1 | テンプレを毎req ParseFiles→起動時1回パース(global) | app.go:281,321,413,498,554,595,768 (template.Must×7) |
 | G2 | DB接続プール設定 SetMaxOpenConns/Idle/ConnMaxLifetime | main() app.go:847付近 |
 | 2 | index追加(posts/comments) ※SQLをrepoに保存し適用 | DB |

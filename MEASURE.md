@@ -77,3 +77,22 @@ sudo pt-query-digest /var/log/mysql/slow.log
 - N+1/テンプレ最適化は **出力HTMLを完全一致** させる（DOM不変）
 - キャッシュは **書込時に必ず無効化**（POST→GET即反映）。一次データを揮発ストア(memcached)に置かない
 - 画像ファイル出し(#4)後も /initialize を壊さない。投稿画像はFS永続化
+
+## AMI既存状態（2026-06-23 確認）
+- nginx: 静的配信(/css,/js,/img,favicon)・`/image/`のtry_files・LTSVログ → **設定済み**（#5完了、#4はnginx側完了＝Bの画像ファイル出し待ち）
+- MySQL: slow_query_log=1, flush_log_at_trx_commit=2 → 設定済み。buffer_pool=1024MB
+- **posts=1204MB（imgdata BLOB）でbuffer_poolに乗り切らない** → #4でDBが激減し全乗り。最重要
+- unicorn worker_processes=1（2vCPU）→ 機会損失
+
+## 追加対策バックログ
+| # | 施策 | 担当 | 効果/メモ |
+|---|------|------|----------|
+| A | unicorn worker_processes 1→4程度 | B | 簡単・高効果。webapp/ruby/unicorn_config.rb |
+| B | comment_count 非正規化/キャッシュ(COUNT(*)毎post廃止) | B | 書込時に無効化 |
+| C | prepared statement 再prepare回避 | B | mysql2 |
+| D | nginx→app keepalive(upstream+http1.1+Connection"") | C | TCP張り直し削減 |
+| E | gzip(css/js)/sendfile/tcp_nopush/open_file_cache | C | |
+| F | OS: somaxconn, nginx worker_connections/auto, fd上限 | C | 終盤 |
+| G | Go実装へ切替(systemctl) | 戦略 | Rubyの2〜5倍。#1-9流用可 |
+
+注: flush_log_at_trx_commit は再起動データ保全のため 1 or 2 を維持（0は不可）。

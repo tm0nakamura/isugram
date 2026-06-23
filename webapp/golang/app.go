@@ -240,6 +240,85 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 	}
 }
 
+// 投稿一覧キャッシュ: id/user_id/body/mime/created_at のみ保持(comment_countはライブ取得)。
+// バージョンカウンタ(post_gen)をインクリメントするだけで全ページが世代交代する。
+const postGenKey = "post_gen"
+
+type cachedPost struct {
+	ID        int       `json:"i"`
+	UserID    int       `json:"u"`
+	Body      string    `json:"b"`
+	Mime      string    `json:"m"`
+	CreatedAt time.Time `json:"t"`
+}
+
+func getPostListGen() uint64 {
+	item, err := memcacheClient.Get(postGenKey)
+	if err != nil {
+		return 0
+	}
+	gen, _ := strconv.ParseUint(string(item.Value), 10, 64)
+	return gen
+}
+
+func incrPostListGen() {
+	if _, err := memcacheClient.Increment(postGenKey, 1); err != nil {
+		memcacheClient.Add(&memcache.Item{Key: postGenKey, Value: []byte("1")})
+	}
+}
+
+func getPostListCache(key string) []Post {
+	item, err := memcacheClient.Get(key)
+	if err != nil {
+		return nil
+	}
+	var cached []cachedPost
+	if json.Unmarshal(item.Value, &cached) != nil {
+		return nil
+	}
+	posts := make([]Post, len(cached))
+	for i, c := range cached {
+		posts[i] = Post{ID: c.ID, UserID: c.UserID, Body: c.Body, Mime: c.Mime, CreatedAt: c.CreatedAt}
+	}
+	return posts
+}
+
+func setPostListCache(key string, posts []Post) {
+	cached := make([]cachedPost, len(posts))
+	for i, p := range posts {
+		cached[i] = cachedPost{ID: p.ID, UserID: p.UserID, Body: p.Body, Mime: p.Mime, CreatedAt: p.CreatedAt}
+	}
+	b, _ := json.Marshal(cached)
+	memcacheClient.Set(&memcache.Item{Key: key, Value: b, Expiration: 300})
+}
+
+// fetchLiveCommentCounts: キャッシュヒット時にcomment_countをDBからIN句一括取得。
+func fetchLiveCommentCounts(ctx context.Context, posts []Post) {
+	if len(posts) == 0 {
+		return
+	}
+	ids := make([]int, len(posts))
+	for i, p := range posts {
+		ids[i] = p.ID
+	}
+	holder, args := inClause(ids)
+	type row struct {
+		ID           int `db:"id"`
+		CommentCount int `db:"comment_count"`
+	}
+	var rows []row
+	if err := db.SelectContext(ctx, &rows, "SELECT `id`, `comment_count` FROM `posts` WHERE `id` IN ("+holder+")", args...); err != nil {
+		return
+	}
+	cmap := make(map[int]int, len(rows))
+	for _, r := range rows {
+		cmap[r.ID] = r.CommentCount
+	}
+	for i := range posts {
+		posts[i].CommentCount = cmap[posts[i].ID]
+	}
+}
+
 // inClause は ids 件数分の "?" プレースホルダ文字列と引数列を返す。
 func inClause(ids []int) (string, []any) {
 	holders := make([]string, len(ids))
@@ -604,14 +683,21 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	me := getSessionUser(r)
 
-	results := []Post{}
+	gen := getPostListGen()
+	cacheKey := fmt.Sprintf("post_list:%d:top", gen)
 
-	// #6 全件取得をやめ、users JOINでdel_flg=0を絞りLIMITで必要数だけ取得。
-	// STRAIGHT_JOINでposts主導にしidx_posts_created_atのbackward index scanを使う。
-	err := db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`, p.`comment_count` FROM `posts` AS p JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT ?", postsPerPage)
-	if err != nil {
-		log.Print(err)
-		return
+	var results []Post
+	if cached := getPostListCache(cacheKey); cached != nil {
+		results = cached
+		fetchLiveCommentCounts(ctx, results)
+	} else {
+		// FORCE INDEX: ANALYZEしても自動選択されないのでヒント必須
+		err := db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`, p.`comment_count` FROM `posts` AS p FORCE INDEX (`idx_posts_created_at`) JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT ?", postsPerPage)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		setPostListCache(cacheKey, results)
 	}
 
 	posts, err := makePosts(ctx, results, getCSRFToken(r), false)
@@ -725,12 +811,20 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := []Post{}
-	// #B getPostsにもgetIndex同様のJOIN+LIMITを適用(created_at <= ?は維持)
-	err = db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`, p.`comment_count` FROM `posts` AS p JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 AND p.`created_at` <= ? ORDER BY p.`created_at` DESC LIMIT ?", t.Format(ISO8601Format), postsPerPage)
-	if err != nil {
-		log.Print(err)
-		return
+	gen := getPostListGen()
+	cacheKey := fmt.Sprintf("post_list:%d:%d", gen, t.Unix())
+
+	var results []Post
+	if cached := getPostListCache(cacheKey); cached != nil {
+		results = cached
+		fetchLiveCommentCounts(ctx, results)
+	} else {
+		err = db.SelectContext(ctx, &results, "SELECT STRAIGHT_JOIN p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at`, p.`comment_count` FROM `posts` AS p FORCE INDEX (`idx_posts_created_at`) JOIN `users` AS u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 AND p.`created_at` <= ? ORDER BY p.`created_at` DESC LIMIT ?", t.Format(ISO8601Format), postsPerPage)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		setPostListCache(cacheKey, results)
 	}
 
 	posts, err := makePosts(ctx, results, getCSRFToken(r), false)
@@ -868,6 +962,9 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	if err := saveImageFile(int(pid), mime, filedata); err != nil {
 		log.Print(err)
 	}
+
+	// 新規投稿で一覧キャッシュを世代交代(POST→GET即反映)
+	incrPostListGen()
 
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
@@ -1010,6 +1107,8 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 		// #9 del_flg変更したのでユーザキャッシュを無効化(POST→GET即反映)
 		memcacheClient.Delete(userCacheKey(id))
 	}
+	// banで可視投稿一覧が変わるため世代交代
+	incrPostListGen()
 
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }

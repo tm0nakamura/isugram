@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"path"
@@ -1078,5 +1079,6 @@ func main() {
 	r.Get(`/@{accountName:[0-9a-zA-Z_]+}`, getAccountName)
 	r.Mount("/", http.FileServer(http.Dir("../public")))
 
+	go http.ListenAndServe("localhost:6060", nil)
 	log.Fatal(http.ListenAndServe(":8080", r))
 }

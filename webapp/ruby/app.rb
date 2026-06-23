@@ -100,35 +100,70 @@ module Isuconp
       end
 
       def make_posts(results, all_comments: false)
-        posts = []
-        results.to_a.each do |post|
-          post[:comment_count] = db.prepare('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?').execute(
-            post[:id]
-          ).first[:count]
+        results = results.to_a
+        return [] if results.empty?
 
-          query = 'SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC'
-          unless all_comments
-            query += ' LIMIT 3'
-          end
-          comments = db.prepare(query).execute(
-            post[:id]
-          ).to_a
-          comments.each do |comment|
-            comment[:user] = db.prepare('SELECT * FROM `users` WHERE `id` = ?').execute(
-              comment[:user_id]
-            ).first
-          end
-          post[:comments] = comments.reverse
-
-          post[:user] = db.prepare('SELECT * FROM `users` WHERE `id` = ?').execute(
-            post[:user_id]
-          ).first
-
-          posts.push(post) if post[:user][:del_flg] == 0
-          break if posts.length >= POSTS_PER_PAGE
+        # 投稿者をIN句で一括取得
+        author_ids = results.map { |p| p[:user_id] }.uniq
+        ph_a = (['?'] * author_ids.size).join(',')
+        authors = {}
+        db.prepare("SELECT * FROM `users` WHERE `id` IN (#{ph_a})").execute(*author_ids).each do |u|
+          authors[u[:id]] = u
         end
 
-        posts
+        # 元実装と同じ順序で del_flg==0 の投稿を最大 POSTS_PER_PAGE 件選ぶ
+        selected = []
+        results.each do |post|
+          u = authors[post[:user_id]]
+          next unless u && u[:del_flg] == 0
+          post[:user] = u
+          selected.push(post)
+          break if selected.length >= POSTS_PER_PAGE
+        end
+        return [] if selected.empty?
+
+        post_ids = selected.map { |p| p[:id] }
+        ph_p = (['?'] * post_ids.size).join(',')
+
+        # コメント数を一括集計
+        counts = Hash.new(0)
+        db.prepare("SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (#{ph_p}) GROUP BY `post_id`").execute(*post_ids).each do |row|
+          counts[row[:post_id]] = row[:count]
+        end
+
+        # コメントを一括取得（created_at DESC, id DESC で単一投稿クエリと同順）
+        comments_by_post = {}
+        post_ids.each { |pid| comments_by_post[pid] = [] }
+        db.prepare("SELECT * FROM `comments` WHERE `post_id` IN (#{ph_p}) ORDER BY `created_at` DESC, `id` DESC").execute(*post_ids).each do |c|
+          comments_by_post[c[:post_id]].push(c)
+        end
+
+        # 各投稿で3件に絞り(all_comments時は全件)、コメント投稿者IDを集める
+        comment_user_ids = []
+        selected.each do |post|
+          list = comments_by_post[post[:id]]
+          list = list[0, 3] unless all_comments
+          comments_by_post[post[:id]] = list
+          list.each { |c| comment_user_ids.push(c[:user_id]) }
+        end
+        comment_user_ids.uniq!
+
+        cusers = {}
+        unless comment_user_ids.empty?
+          ph_c = (['?'] * comment_user_ids.size).join(',')
+          db.prepare("SELECT * FROM `users` WHERE `id` IN (#{ph_c})").execute(*comment_user_ids).each do |u|
+            cusers[u[:id]] = u
+          end
+        end
+
+        selected.each do |post|
+          post[:comment_count] = counts[post[:id]]
+          list = comments_by_post[post[:id]]
+          list.each { |c| c[:user] = cusers[c[:user_id]] }
+          post[:comments] = list.reverse
+        end
+
+        selected
       end
 
       def image_url(post)
